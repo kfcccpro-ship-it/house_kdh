@@ -10,4 +10,4 @@ export const firebaseConfig = {
 
 // 로그인한 계정의 UID로 화면을 구분 (Firestore 보안 규칙의 UID와 같아야 함)
 export const PARENT_UID = "6qTZSXhc3hc5GnHfd0GmV19vd1Y2";
-export const KID_UID = "V6mtSKCmzieQsKo4LRKiAHrm3Vk1";
+export const KID_UID = "V18vUWTTEOSPFLJ5D7fH25I110F3";
