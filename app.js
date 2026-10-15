@@ -2,7 +2,7 @@ import { initializeApp } from "https://www.gstatic.com/firebasejs/10.14.1/fireba
 import { getAuth, onAuthStateChanged, signInWithEmailAndPassword, signOut }
   from "https://www.gstatic.com/firebasejs/10.14.1/firebase-auth.js";
 import { getFirestore, collection, doc, setDoc, addDoc, deleteDoc, getDocs, onSnapshot,
-  query, where, orderBy, writeBatch, serverTimestamp }
+  query, where, orderBy, limit, writeBatch, serverTimestamp, increment }
   from "https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js";
 import { firebaseConfig, PARENT_UID, KID_UID } from "./firebase-config.js";
 
@@ -17,6 +17,10 @@ const dkey = (d = new Date()) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${
 const hm = (d = new Date()) => `${pad(d.getHours())}:${pad(d.getMinutes())}`;
 const won = n => Number(n || 0).toLocaleString("ko-KR") + "원";
 const DAYS = ["일", "월", "화", "수", "목", "금", "토"], ALL = [0, 1, 2, 3, 4, 5, 6];
+const fmtDate = k => { const [y, m, d] = k.split("-"); return `${+m}/${+d}(${DAYS[new Date(y, m - 1, d).getDay()]})`; };
+const sum = a => a.reduce((s, x) => s + (Number(x.amount) || 0), 0);
+// 예전 버전의 'done'은 '확인 대기'로 취급
+const stOf = x => !x ? null : (x.status === "done" ? "pending" : x.status);
 const EMOS = ["☀️💊", "🌙💊", "🍚", "👕", "📚", "🪥", "🛏️", "🧹", "📖", "✏️", "🎒", "🚿", "🗑️", "🏃", "🐶", "💊"];
 const DEFAULT_TASKS = [
   { emoji: "☀️💊", name: "아침약", amount: 2000, alarm: "07:30", days: ALL },
@@ -28,15 +32,17 @@ const DEFAULT_TASKS = [
 ];
 
 let role = null, curDay = dkey(), unsubs = [];
-let tasks = [], recs = {}, doneAll = [], ledger = [];
+let tasks = [], recs = {}, openRecs = [], paidRecs = [], statsTotal = 0, ledger = [];
+let tab = "review", editing = null, payArm = false, camTask = null, armed = null;
+
 /* ---------- 시간 알림 (APK 안에서만 동작) ---------- */
 const LN = window.Capacitor?.isNativePlatform?.() ? window.Capacitor.Plugins?.LocalNotifications : null;
 let alarmSig = "";
-async function scheduleAlarms() {
+async function scheduleAlarms() {            // 아이 폰: 할 일 시간 알림
   if (!LN) return;
   const items = [];
   tasks.forEach((t, i) => {
-    if (!t.alarm) return;
+    if (!t.alarm || t.hidden) return;
     const [h, m] = t.alarm.split(":").map(Number);
     (t.days || ALL).forEach(d => items.push({
       id: (i + 1) * 10 + d + 1, title: `${t.emoji} ${t.name}`, body: "사진 찍을 시간이에요!",
@@ -51,21 +57,28 @@ async function scheduleAlarms() {
     if (items.length) await LN.schedule({ notifications: items });
   } catch (e) { console.warn("알림 예약 실패", e); alarmSig = ""; }
 }
-
-let tab = "today", editing = null, payArm = false, camTask = null;
+const getReviewAlarm = () => { try { return localStorage.getItem("mc-review-alarm") || "09:00"; } catch (e) { return "09:00"; } };
+async function scheduleReviewAlarm() {       // 부모 폰: 매일 확인 알림
+  if (!LN) return;
+  try {
+    const p = await LN.requestPermissions(); if (p.display !== "granted") return;
+    await LN.cancel({ notifications: [{ id: 9001 }] });
+    const [h, m] = getReviewAlarm().split(":").map(Number);
+    await LN.schedule({ notifications: [{ id: 9001, title: "📋 어제 미션 확인", body: "확인하고 용돈을 이체해 주세요.",
+      schedule: { on: { hour: h, minute: m }, allowWhileIdle: true } }] });
+  } catch (e) { console.warn("확인 알림 예약 실패", e); }
+}
 
 /* ---------- 공통 ---------- */
-function show(id) {
-  for (const s of ["login", "kid", "par"]) $("#" + s).hidden = s !== id;
-}
+function show(id) { for (const s of ["login", "kid", "par"]) $("#" + s).hidden = s !== id; }
 function stopAll() { unsubs.forEach(u => u()); unsubs = []; }
 let tt;
 function toast(b, s) {
   $("#toastB").textContent = b; $("#toastS").textContent = s;
   $("#toast").classList.add("on"); clearTimeout(tt);
-  tt = setTimeout(() => $("#toast").classList.remove("on"), 1800);
+  tt = setTimeout(() => $("#toast").classList.remove("on"), 2000);
 }
-const todayTasks = () => tasks.filter(t => (t.days || ALL).includes(new Date().getDay()));
+const todayTasks = () => tasks.filter(t => !t.hidden && (t.days || ALL).includes(new Date().getDay()));
 
 /* ---------- 로그인 ---------- */
 $("#lEmail").value = (() => { try { return localStorage.getItem("mc-email") || ""; } catch (e) { return ""; } })();
@@ -83,13 +96,11 @@ $("#loginForm").addEventListener("submit", async e => {
       "auth/invalid-email": "이메일 형식이 올바르지 않아요.",
       "auth/too-many-requests": "시도가 너무 많아요. 잠시 후 다시 해 주세요.",
       "auth/network-request-failed": "인터넷 연결을 확인해 주세요.",
-      "auth/api-key-not-valid.-please-pass-a-valid-api-key.": "앱 설정(apiKey)이 올바르지 않아요. 관리자에게 알려 주세요.",
     }[err.code];
     $("#lErr").textContent = m || ("로그인 실패: " + (err.code || err.message));
   }
   $("#lBtn").disabled = false;
 });
-
 onAuthStateChanged(auth, user => {
   stopAll();
   if (!user) { role = null; show("login"); return; }
@@ -97,67 +108,119 @@ onAuthStateChanged(auth, user => {
   else if (user.uid === KID_UID) { role = "kid"; startKid(); }
   else { signOut(auth); $("#lErr").textContent = "이 계정은 사용할 수 없어요."; }
 });
-
-// 자정이 지나 앱이 켜져 있으면 날짜 새로 시작
 document.addEventListener("visibilitychange", () => {
   if (document.visibilityState === "visible" && role && dkey() !== curDay) {
     stopAll(); role === "kid" ? startKid() : startParent();
   }
 });
 
-/* 지난 날짜 사진 삭제 (기록·금액은 남김) */
+/* 지난 사진 정리: 확인이 끝난 기록의 사진만 지움 (확인 대기 사진은 보관) */
 async function cleanOldPhotos() {
   try {
-    const snap = await getDocs(query(collection(db, "records"), where("date", "<", dkey())));
-    const olds = snap.docs.filter(d => d.data().photo);
+    const snap = await getDocs(query(collection(db, "records"), where("hasPhoto", "==", true)));
+    const olds = snap.docs.filter(d => { const x = d.data(); return x.date < dkey() && stOf(x) !== "pending"; });
     for (let i = 0; i < olds.length; i += 400) {
       const b = writeBatch(db);
-      olds.slice(i, i + 400).forEach(d => b.update(d.ref, { photo: "" }));
+      olds.slice(i, i + 400).forEach(d => b.update(d.ref, { photo: "", hasPhoto: false }));
       await b.commit();
     }
   } catch (e) { console.warn("사진 정리 실패", e); }
 }
 
-/* 오늘 기록 구독 (아이·부모 공통) */
-function listenToday(render) {
+/* 공통 구독 */
+function listenAll(render) {
   curDay = dkey();
+  const ym = curDay.slice(0, 7);
+  const err = e => console.error(e);
   unsubs.push(onSnapshot(query(collection(db, "tasks"), orderBy("order")), s => {
     tasks = s.docs.map(d => ({ id: d.id, ...d.data() })); render();
-  }, e => console.error(e)));
+  }, err));
   unsubs.push(onSnapshot(query(collection(db, "records"), where("date", "==", curDay)), s => {
     recs = {}; s.docs.forEach(d => { const x = d.data(); recs[x.taskId] = x; }); render();
-  }, e => console.error(e)));
+  }, err));
+  unsubs.push(onSnapshot(query(collection(db, "records"), where("status", "in", ["pending", "approved", "done"])), s => {
+    openRecs = s.docs.map(d => ({ id: d.id, ...d.data() })); render();
+  }, err));
+  unsubs.push(onSnapshot(query(collection(db, "records"), where("paidOn", ">=", ym + "-01")), s => {
+    paidRecs = s.docs.map(d => ({ id: d.id, ...d.data() })).filter(x => x.status === "paid"); render();
+  }, err));
+  unsubs.push(onSnapshot(doc(db, "stats", "total"), s => {
+    statsTotal = s.exists() ? (s.data().paid || 0) : 0; render();
+  }, err));
 }
 
 /* ---------- 아이 ---------- */
-function startKid() {
-  show("kid"); listenToday(renderKid); cleanOldPhotos();
-}
+function startKid() { show("kid"); listenAll(renderKid); cleanOldPhotos(); }
+
 function renderKid() {
   const d = new Date(), list = todayTasks();
   $("#kDate").textContent = `${d.getMonth() + 1}월 ${d.getDate()}일 ${DAYS[d.getDay()]}요일`;
-  const done = list.filter(t => recs[t.id]?.status === "done");
-  $("#kCnt").textContent = `${done.length}/${list.length}`;
-  $("#kWon").textContent = won(done.reduce((a, t) => a + (recs[t.id].amount || 0), 0));
-  $("#kBar").style.width = (list.length ? done.length / list.length * 100 : 0) + "%";
-  const next = list.find(t => recs[t.id]?.status !== "done");
+  const sent = list.filter(t => recs[t.id] && stOf(recs[t.id]) !== "rejected");
+  $("#kCnt").textContent = `${sent.length}/${list.length}`;
+  $("#kBar").style.width = (list.length ? sent.length / list.length * 100 : 0) + "%";
+
+  // 용돈 요약: 확정 / 확인 대기 / 받은 돈
+  const pend = sum(openRecs.filter(x => stOf(x) === "pending"));
+  const appr = sum(openRecs.filter(x => x.status === "approved"));
+  const paidMonth = sum(paidRecs);
+  $("#kSum").innerHTML = `
+    <div class="sum-main"><small>💸 지금까지 받은 돈</small><b>${won(statsTotal)}</b><span>이번 달 ${won(paidMonth)}</span></div>
+    <div class="sum-row">
+      <div class="sum-appr"><small>✅ 확정</small><b>${won(appr)}</b></div>
+      <div class="sum-pend"><small>⏳ 확인 대기</small><b>${won(pend)}</b></div>
+    </div>
+    <p class="note">⏳는 아직 확정이 아니에요. 부모님이 확인하면 ✅, 이체되면 받은 돈에 더해져요.</p>`;
+
+  const next = list.find(t => !recs[t.id] || stOf(recs[t.id]) === "rejected");
   const n = list.length, dd = n <= 3 ? "xl" : n <= 6 ? "m" : n <= 9 ? "s" : "xs", sm = n > 6;
   $("#kGrid").dataset.d = dd; $("#kid").dataset.d = dd;
   $("#kGrid").innerHTML = list.map(t => {
-    const x = recs[t.id], st = x?.status;
-    const cls = st === "done" ? "done" : st === "rejected" ? "rej" : (t === next ? "next" : "");
-    const lab = st === "done" ? "✅ 완료" : st === "rejected" ? (sm ? "↺ 다시" : "↺ 다시 찍기") : (sm ? "📷 찍기" : "📷 사진 찍기");
-    const th = st === "done" ? (x.photo ? `<img class="thumb" src="${esc(x.photo)}" alt="">` : `<span class="thumb">📸</span>`) : "";
-    return `<button class="tile ${cls}" data-id="${esc(t.id)}">${th}<span class="emo">${esc(t.emoji)}</span><span class="nm">${esc(t.name)}</span><span class="st">${lab}</span></button>`;
+    const x = recs[t.id], st = stOf(x), np = t.needPhoto !== false;
+    const cls = { pending: "pend", approved: "appr", paid: "paid", rejected: "rej" }[st] || (t === next ? "next" : "");
+    let lab;
+    if (st === "pending") lab = sm ? "⏳ 대기" : "⏳ 확인 대기";
+    else if (st === "approved") lab = "✅ 확정";
+    else if (st === "paid") lab = sm ? "💸 받음" : "💸 받았어요";
+    else if (st === "rejected") lab = sm ? "↺ 다시" : "↺ 다시 하기";
+    else if (armed === t.id) lab = sm ? "한 번 더!" : "한 번 더 눌러요!";
+    else lab = np ? (sm ? "📷 찍기" : "📷 사진 찍기") : (sm ? "👆 완료" : "👆 완료하기");
+    const th = x?.photo && st === "pending" ? `<img class="thumb" src="${esc(x.photo)}" alt="">` : "";
+    const memo = t.memo && dd !== "xs" ? `<span class="memo">${esc(t.memo)}</span>` : "";
+    return `<button class="tile ${cls}" data-id="${esc(t.id)}">${th}<span class="emo">${esc(t.emoji)}</span><span class="nm">${esc(t.name)}</span>${memo}<span class="st">${lab}</span></button>`;
   }).join("");
-  $("#kClear").hidden = !(list.length && done.length === list.length);
+  $("#kClear").hidden = !(list.length && sent.length === list.length);
+
+  // 날짜별 기록
+  const by = {}, add = (x, k) => { (by[x.date] ||= { pending: 0, approved: 0, paid: 0 })[k] += Number(x.amount) || 0; };
+  openRecs.forEach(x => add(x, stOf(x))); paidRecs.forEach(x => add(x, "paid"));
+  const dates = Object.keys(by).sort().reverse().slice(0, 10);
+  $("#kHist").innerHTML = dates.map(k => `<div class="row"><div class="tx"><b>${fmtDate(k)}</b></div><div class="chips">
+    ${by[k].pending ? `<span class="tag pend">⏳ ${won(by[k].pending)}</span>` : ""}
+    ${by[k].approved ? `<span class="tag ok">✅ ${won(by[k].approved)}</span>` : ""}
+    ${by[k].paid ? `<span class="tag paid">💸 ${won(by[k].paid)}</span>` : ""}</div></div>`).join("")
+    || '<div class="row"><div class="tx"><span>아직 기록이 없어요.</span></div></div>';
   scheduleAlarms();
 }
+
 $("#kGrid").addEventListener("click", e => {
   const b = e.target.closest(".tile"); if (!b) return;
-  if (recs[b.dataset.id]?.status === "done") { toast("👍", "이미 완료했어요!"); return; }
-  camTask = b.dataset.id; $("#cam").value = ""; $("#cam").click();
+  const id = b.dataset.id, t = tasks.find(x => x.id === id), st = stOf(recs[id]); if (!t) return;
+  if (st === "pending") { toast("⏳", "부모님 확인을 기다리는 중이에요"); return; }
+  if (st === "approved" || st === "paid") { toast("👍", "이미 확정됐어요!"); return; }
+  if (t.needPhoto === false) {                      // 사진 없이 체크: 두 번 눌러 완료
+    if (armed !== id) { armed = id; renderKid(); setTimeout(() => { if (armed === id) { armed = null; renderKid(); } }, 3000); return; }
+    armed = null; submit(t, ""); return;
+  }
+  camTask = id; $("#cam").value = ""; $("#cam").click();
 });
+function submit(t, photo) {
+  // 기다리지 않고 전송: 인터넷이 느려도 화면은 바로 바뀌고 자동으로 올라감
+  setDoc(doc(db, "records", `${dkey()}_${t.id}`), {
+    date: dkey(), taskId: t.id, taskName: t.name, status: "pending", at: hm(),
+    amount: Number(t.amount) || 0, photo, hasPhoto: !!photo, kb: Math.round(photo.length * 0.75 / 1024)
+  }).catch(err => { console.error(err); toast("😥", "올리지 못했어요. 다시 해 주세요"); });
+  toast("올렸어요!", `${t.name} · ${won(t.amount)} 확인 대기 ⏳`);
+}
 function compress(file) {
   return new Promise((res, rej) => {
     const img = new Image(), u = URL.createObjectURL(file);
@@ -173,32 +236,21 @@ function compress(file) {
 $("#cam").addEventListener("change", async e => {
   const f = e.target.files[0], id = camTask; if (!f || !id) return;
   const t = tasks.find(x => x.id === id); if (!t) return;
-  try {
-    const photo = await compress(f), key = `${dkey()}_${id}`;
-    // 기다리지 않고 전송: 인터넷이 느려도 화면은 바로 완료로 바뀌고 자동으로 올라감
-    setDoc(doc(db, "records", key), {
-      date: dkey(), taskId: id, taskName: t.name, status: "done", at: hm(),
-      amount: Number(t.amount) || 0, photo, kb: Math.round(photo.length * 0.75 / 1024)
-    }).catch(err => { console.error(err); toast("😥", "올리지 못했어요. 다시 찍어 주세요"); });
-    toast("+" + won(t.amount), `${t.name} 완료! 🎉`);
-  } catch (err) { toast("😥", "사진을 못 읽었어요. 다시 찍어 주세요"); }
+  try { submit(t, await compress(f)); } catch (err) { toast("😥", "사진을 못 읽었어요. 다시 찍어 주세요"); }
 });
 
 /* ---------- 부모 ---------- */
 async function startParent() {
-  show("par"); listenToday(renderPar); cleanOldPhotos();
-  unsubs.push(onSnapshot(query(collection(db, "records"), where("status", "==", "done")), s => {
-    doneAll = s.docs.map(d => d.data()); if (tab === "money") renderPar();
-  }));
-  unsubs.push(onSnapshot(query(collection(db, "ledger"), orderBy("at", "desc")), s => {
+  show("par"); listenAll(renderPar);
+  unsubs.push(onSnapshot(query(collection(db, "ledger"), orderBy("at", "desc"), limit(30)), s => {
     ledger = s.docs.map(d => ({ id: d.id, ...d.data() })); if (tab === "money") renderPar();
   }));
-  // 처음 한 번: 기본 할 일 6개 등록
+  cleanOldPhotos(); scheduleReviewAlarm();
   try {
     const s = await getDocs(collection(db, "tasks"));
     if (s.empty) {
       const b = writeBatch(db);
-      DEFAULT_TASKS.forEach((t, i) => b.set(doc(collection(db, "tasks")), { ...t, order: i + 1 }));
+      DEFAULT_TASKS.forEach((t, i) => b.set(doc(collection(db, "tasks")), { ...t, order: i + 1, needPhoto: true, hidden: false, memo: "" }));
       await b.commit();
     }
   } catch (e) { console.error(e); }
@@ -209,53 +261,92 @@ document.querySelector(".tabs").addEventListener("click", e => {
 });
 function renderPar() {
   document.querySelectorAll(".tabs button").forEach(b => b.setAttribute("aria-selected", b.dataset.t === tab));
-  $("#tToday").hidden = tab !== "today"; $("#tTasks").hidden = tab !== "tasks"; $("#tMoney").hidden = tab !== "money";
-  ({ today: renderToday, tasks: renderTasks, money: renderMoney })[tab]();
+  $("#tReview").hidden = tab !== "review"; $("#tTasks").hidden = tab !== "tasks"; $("#tMoney").hidden = tab !== "money";
+  ({ review: renderReview, tasks: renderTasks, money: renderMoney })[tab]();
+  const n = openRecs.filter(x => stOf(x) === "pending").length;
+  document.querySelector('.tabs [data-t="review"]').textContent = n ? `확인 (${n})` : "확인";
 }
 
-function ph(x, t) {
-  return x?.photo ? `<img class="ph" src="${esc(x.photo)}" alt="${esc(t.name)} 사진">`
-    : `<span class="ph">${x ? "📸" : esc(t.emoji)}</span>`;
+function ph(x) {
+  return x?.photo ? `<img class="ph" src="${esc(x.photo)}" alt="${esc(x.taskName)} 사진">` : `<span class="ph">${x?.hasPhoto === false && x?.photo === "" && x?.kb === 0 ? "✔️" : "📸"}</span>`;
 }
-function renderToday() {
-  const list = todayTasks(), done = list.filter(t => recs[t.id]?.status === "done");
-  $("#tToday").innerHTML = `
-    <div class="duo"><div><small>오늘 완료</small><b>${done.length} / ${list.length}</b></div><div><small>오늘 적립</small><b>${won(done.reduce((a, t) => a + (recs[t.id].amount || 0), 0))}</b></div></div>
-    <div class="list">${list.map(t => {
-      const x = recs[t.id];
-      const tag = x?.status === "done" ? `<span class="tag ok">완료 ${esc(x.at)}</span>` : x?.status === "rejected" ? '<span class="tag no">반려됨</span>' : '<span class="tag wait">대기</span>';
-      const sub = x?.status === "done" ? `${won(x.amount)}${x.photo ? ` · 사진 ${x.kb}KB` : " · 사진 삭제됨"}` : won(t.amount);
-      const btn = x?.status === "done" ? `<button class="pill sm warn" data-rej="${esc(t.id)}">반려</button>` : "";
-      return `<div class="row">${ph(x, t)}<div class="tx"><b>${esc(t.emoji)} ${esc(t.name)}</b><span>${sub}</span></div>${tag}${btn}</div>`;
-    }).join("") || '<div class="row"><div class="tx"><span>오늘 할 일이 없어요.</span></div></div>'}</div>
-    <p class="note">사진이 엉뚱하면 [반려]를 누르세요. 적립이 취소되고 아이 화면에 '다시 찍기'가 표시됩니다. 사진은 다음 날 자동 삭제되고 기록과 금액은 남습니다.</p>`;
+function renderReview() {
+  const pend = openRecs.filter(x => stOf(x) === "pending"), appr = openRecs.filter(x => x.status === "approved");
+  const dates = [...new Set(pend.map(x => x.date))].sort().reverse();
+  const apprDates = [...new Set(appr.map(x => x.date))].sort();
+  const today = todayTasks();
+  $("#tReview").innerHTML = `
+    <div class="big"><small>확인할 것</small><b>${pend.length}건 · ${won(sum(pend))}</b></div>
+    ${dates.map(k => { const g = pend.filter(x => x.date === k);
+      return `<div class="sec"><div class="grp"><b>${fmtDate(k)} · ${g.length}건 · ${won(sum(g))}</b><button class="pill sm solid" data-appr="${k}">전체 승인</button></div>
+      <div class="list">${g.map(x => `<div class="row">${ph(x)}<div class="tx"><b>${esc(x.taskName)}</b><span>${esc(x.at)} · ${won(x.amount)}${x.photo ? ` · ${x.kb}KB` : " · 사진 없음"}</span></div><button class="pill sm warn" data-rej="${esc(x.id)}">반려</button></div>`).join("")}</div></div>`; }).join("")
+      || '<div class="list"><div class="row"><div class="tx"><span>확인할 항목이 없어요.</span></div></div></div>'}
+    <div class="big pay"><small>이체할 금액 (승인 완료)</small><b>${won(sum(appr))}</b>
+      <span class="sub">${apprDates.length ? apprDates.map(fmtDate).join(", ") : "승인된 항목이 없어요"}</span>
+      <button class="pill" id="pay" ${appr.length ? "" : "disabled"}>${payArm ? "한 번 더 누르면 이체 완료" : "이체 완료로 처리"}</button></div>
+    <h3>오늘 진행</h3>
+    <div class="list">${today.map(t => { const x = recs[t.id], st = stOf(x);
+      const tag = { pending: '<span class="tag pend">확인 대기</span>', approved: '<span class="tag ok">승인</span>', paid: '<span class="tag paid">이체됨</span>', rejected: '<span class="tag no">반려</span>' }[st] || '<span class="tag wait">아직</span>';
+      return `<div class="row"><span class="ph">${esc(t.emoji)}</span><div class="tx"><b>${esc(t.name)}</b><span>${won(t.amount)}${x ? " · " + esc(x.at) : ""}</span></div>${tag}</div>`; }).join("")}</div>
+    <p class="note">사진은 승인 후 다음 날 자동 삭제됩니다. 기록과 금액은 남습니다.</p>`;
 }
-$("#tToday").addEventListener("click", e => {
-  const id = e.target.dataset.rej; if (!id) return;
-  const x = recs[id]; if (!x) return;
-  setDoc(doc(db, "records", `${x.date}_${id}`), { ...x, status: "rejected", photo: "", kb: 0 })
-    .catch(err => { console.error(err); toast("😥", "반려하지 못했어요"); });
+$("#tReview").addEventListener("click", async e => {
+  const b = e.target.closest("button"); if (!b) return;
+  if (b.dataset.appr) {
+    const g = openRecs.filter(x => x.date === b.dataset.appr && stOf(x) === "pending");
+    const batch = writeBatch(db); g.forEach(x => batch.update(doc(db, "records", x.id), { status: "approved" }));
+    batch.commit().catch(err => { console.error(err); toast("😥", "승인하지 못했어요"); }); return;
+  }
+  if (b.dataset.rej) {
+    const x = openRecs.find(y => y.id === b.dataset.rej); if (!x) return;
+    const { id, ...data } = x;
+    setDoc(doc(db, "records", id), { ...data, status: "rejected", photo: "", hasPhoto: false, kb: 0 })
+      .catch(err => { console.error(err); toast("😥", "반려하지 못했어요"); }); return;
+  }
+  if (b.id === "pay") {
+    if (!payArm) { payArm = true; renderReview(); return; }
+    payArm = false;
+    const list = openRecs.filter(x => x.status === "approved"); if (!list.length) return;
+    const amt = sum(list), dates = [...new Set(list.map(x => x.date))].sort();
+    const batch = writeBatch(db);
+    list.forEach(x => batch.update(doc(db, "records", x.id), { status: "paid", paidOn: dkey() }));
+    batch.set(doc(collection(db, "ledger")), { amount: amt, count: list.length, dates, at: serverTimestamp() });
+    batch.set(doc(db, "stats", "total"), { paid: increment(amt) }, { merge: true });
+    batch.commit().then(() => toast("이체 완료", won(amt))).catch(err => { console.error(err); toast("😥", "처리하지 못했어요"); });
+  }
 });
 
 function renderTasks() {
   const t = editing;
   $("#tTasks").innerHTML = `
-    <div class="list">${tasks.map(x => `<div class="row"><span class="ph">${esc(x.emoji)}</span><div class="tx"><b>${esc(x.name)}</b><span>${won(x.amount)} · ${x.alarm ? "알림 " + esc(x.alarm) : "알림 없음"} · ${(x.days || ALL).length === 7 ? "매일" : (x.days || []).map(d => DAYS[d]).join("")}</span></div><button class="pill sm" data-ed="${esc(x.id)}">수정</button></div>`).join("")}</div>
+    <div class="list">${tasks.map(x => `<div class="row${x.hidden ? " dim" : ""}"><span class="ph">${esc(x.emoji)}</span><div class="tx"><b>${esc(x.name)}${x.hidden ? ' <span class="tag wait">숨김</span>' : ""}</b><span>${won(x.amount)} · ${x.alarm ? "알림 " + esc(x.alarm) : "알림 없음"} · ${(x.days || ALL).length === 7 ? "매일" : (x.days || []).map(d => DAYS[d]).join("")}${x.needPhoto === false ? " · 사진 없이" : ""}</span></div><button class="pill sm" data-ed="${esc(x.id)}">수정</button></div>`).join("")}</div>
     ${t ? `<div class="ed" id="ed">
       <label>아이콘<div class="emos">${EMOS.map(m => `<button type="button" data-emo="${esc(m)}" aria-pressed="${m === t.emoji}">${m}</button>`).join("")}</div></label>
       <label for="fName">할 일 이름<input id="fName" value="${esc(t.name)}" placeholder="예: 영어 단어 20개"></label>
-      <div class="duo"><label for="fAmt" style="display:flex;flex-direction:column;gap:6px;font-size:13px;font-weight:800;color:var(--muted)">용돈(원)<input id="fAmt" type="number" inputmode="numeric" step="500" min="0" value="${esc(t.amount)}"></label>
-      <label for="fAlarm" style="display:flex;flex-direction:column;gap:6px;font-size:13px;font-weight:800;color:var(--muted)">알림 시간<input id="fAlarm" type="time" value="${esc(t.alarm || "")}"></label></div>
+      <label for="fMemo">아이에게 보이는 메모 (선택)<input id="fMemo" value="${esc(t.memo || "")}" placeholder="예: 밥 먹고 바로!"></label>
+      <div class="duo"><label for="fAmt">용돈(원)<input id="fAmt" type="number" inputmode="numeric" step="500" min="0" value="${esc(t.amount)}"></label>
+      <label for="fAlarm">알림 시간<input id="fAlarm" type="time" value="${esc(t.alarm || "")}"></label></div>
       <label>요일<div class="days">${DAYS.map((d, i) => `<button type="button" data-day="${i}" aria-pressed="${t.days.includes(i)}">${d}</button>`).join("")}</div></label>
+      <div class="switches">
+        <button type="button" class="sw" data-sw="needPhoto" aria-pressed="${t.needPhoto !== false}">📷 사진 필요</button>
+        <button type="button" class="sw" data-sw="hidden" aria-pressed="${!!t.hidden}">🙈 임시 숨김</button>
+      </div>
       <div class="acts">${t.id ? `<button class="pill sm warn" id="fDel">${t.delArm ? "정말 삭제" : "삭제"}</button>` : ""}<button class="pill sm" id="fCancel">취소</button><button class="pill sm solid" id="fSave">저장</button></div>
-    </div>` : `<button class="add" id="addT">+ 할 일 추가</button>`}`;
+    </div>` : `<button class="add" id="addT">+ 할 일 추가</button>`}
+    <div class="ed"><label for="fReview">부모 확인 알림 시간 (이 폰, 앱에서만 울림)<input id="fReview" type="time" value="${esc(getReviewAlarm())}"></label></div>`;
 }
+$("#tTasks").addEventListener("change", e => {
+  if (e.target.id !== "fReview") return;
+  try { localStorage.setItem("mc-review-alarm", e.target.value || "09:00"); } catch (er) { }
+  scheduleReviewAlarm(); toast("저장했어요", `매일 ${e.target.value || "09:00"}에 알려요`);
+});
 $("#tTasks").addEventListener("click", async e => {
   const b = e.target.closest("button"); if (!b) return;
-  const sync = () => { if (!editing) return; editing.name = $("#fName").value; editing.amount = +$("#fAmt").value || 0; editing.alarm = $("#fAlarm").value; };
-  if (b.id === "addT") { editing = { id: null, emoji: "📖", name: "", amount: 2000, alarm: "", days: [...ALL] }; renderTasks(); $("#fName").focus(); return; }
+  const sync = () => { if (!editing) return; editing.name = $("#fName").value; editing.memo = $("#fMemo").value; editing.amount = +$("#fAmt").value || 0; editing.alarm = $("#fAlarm").value; };
+  if (b.id === "addT") { editing = { id: null, emoji: "📖", name: "", memo: "", amount: 2000, alarm: "", days: [...ALL], needPhoto: true, hidden: false }; renderTasks(); $("#fName").focus(); return; }
   if (b.dataset.ed) { const x = tasks.find(y => y.id === b.dataset.ed); editing = { ...x, days: [...(x.days || ALL)] }; renderTasks(); return; }
   if (b.dataset.emo) { sync(); editing.emoji = b.dataset.emo; renderTasks(); return; }
+  if (b.dataset.sw) { sync(); const k = b.dataset.sw; editing[k] = k === "needPhoto" ? editing.needPhoto === false : !editing.hidden; renderTasks(); return; }
   if (b.dataset.day) { sync(); const d = +b.dataset.day; editing.days = editing.days.includes(d) ? editing.days.filter(x => x !== d) : [...editing.days, d].sort(); renderTasks(); return; }
   if (b.id === "fCancel") { editing = null; renderTasks(); return; }
   if (b.id === "fDel") {
@@ -266,7 +357,8 @@ $("#tTasks").addEventListener("click", async e => {
   }
   if (b.id === "fSave") {
     sync(); if (!editing.name.trim()) { $("#fName").focus(); return; }
-    const { id, delArm, ...data } = editing; data.name = data.name.trim();
+    const { id, delArm, ...data } = editing; data.name = data.name.trim(); data.memo = data.memo.trim();
+    data.needPhoto = data.needPhoto !== false; data.hidden = !!data.hidden;
     editing = null; renderTasks();
     const p = id ? setDoc(doc(db, "tasks", id), data, { merge: true })
       : addDoc(collection(db, "tasks"), { ...data, order: Date.now() });
@@ -275,25 +367,16 @@ $("#tTasks").addEventListener("click", async e => {
 });
 
 function renderMoney() {
-  const earned = doneAll.reduce((a, x) => a + (x.amount || 0), 0), paid = ledger.reduce((a, x) => a + (x.amount || 0), 0);
-  const byDay = {}; doneAll.forEach(x => { (byDay[x.date] ||= { n: 0, sum: 0 }); byDay[x.date].n++; byDay[x.date].sum += x.amount || 0; });
-  const days = Object.keys(byDay).sort().reverse();
+  const by = {}, add = (x, k) => { (by[x.date] ||= { pending: 0, approved: 0, paid: 0 })[k] += Number(x.amount) || 0; };
+  openRecs.forEach(x => add(x, stOf(x))); paidRecs.forEach(x => add(x, "paid"));
+  const dates = Object.keys(by).sort().reverse().slice(0, 31);
   const fmtAt = a => { const d = a?.toDate ? a.toDate() : null; return d ? `${d.getMonth() + 1}월 ${d.getDate()}일 ${hm(d)}` : "처리 중"; };
   $("#tMoney").innerHTML = `
-    <div class="big"><small>지급할 용돈</small><b>${won(earned - paid)}</b>
-      <button class="pill" id="pay" style="align-self:flex-start;border-color:var(--bg);color:var(--bg)" ${earned - paid <= 0 ? "disabled" : ""}>${payArm ? "한 번 더 누르면 지급 완료" : "지급 완료로 처리"}</button></div>
-    <div class="duo"><div><small>누적 적립</small><b>${won(earned)}</b></div><div><small>지급 완료</small><b>${won(paid)}</b></div></div>
-    <h3>날짜별 적립</h3>
-    <div class="list">${days.map(k => { const [y, m, d] = k.split("-");
-      return `<div class="row"><div class="tx"><b>${+m}월 ${+d}일 ${DAYS[new Date(y, m - 1, d).getDay()]}</b><span>${byDay[k].n}개 완료</span></div><b>${won(byDay[k].sum)}</b></div>`; }).join("") || '<div class="row"><div class="tx"><span>아직 적립이 없어요.</span></div></div>'}</div>
-    ${ledger.length ? `<h3>지급 기록</h3><div class="list">${ledger.map(x => `<div class="row"><div class="tx"><b>${fmtAt(x.at)}</b></div><b>${won(x.amount)}</b></div>`).join("")}</div>` : ""}`;
+    <div class="duo"><div><small>지금까지 이체한 금액</small><b>${won(statsTotal)}</b></div><div><small>이번 달 이체</small><b>${won(sum(paidRecs))}</b></div></div>
+    <h3>날짜별 (최근 기록)</h3>
+    <div class="list">${dates.map(k => `<div class="row"><div class="tx"><b>${fmtDate(k)}</b></div><div class="chips">
+      ${by[k].pending ? `<span class="tag pend">⏳ ${won(by[k].pending)}</span>` : ""}
+      ${by[k].approved ? `<span class="tag ok">✅ ${won(by[k].approved)}</span>` : ""}
+      ${by[k].paid ? `<span class="tag paid">💸 ${won(by[k].paid)}</span>` : ""}</div></div>`).join("") || '<div class="row"><div class="tx"><span>아직 기록이 없어요.</span></div></div>'}</div>
+    ${ledger.length ? `<h3>이체 기록</h3><div class="list">${ledger.map(x => `<div class="row"><div class="tx"><b>${fmtAt(x.at)}</b><span>${x.count || 0}건 · ${(x.dates || []).map(fmtDate).join(", ")}</span></div><b>${won(x.amount)}</b></div>`).join("")}</div>` : ""}`;
 }
-$("#tMoney").addEventListener("click", e => {
-  if (e.target.id !== "pay") return;
-  if (!payArm) { payArm = true; renderMoney(); return; }
-  const amt = doneAll.reduce((a, x) => a + (x.amount || 0), 0) - ledger.reduce((a, x) => a + (x.amount || 0), 0);
-  payArm = false;
-  if (amt > 0) addDoc(collection(db, "ledger"), { amount: amt, at: serverTimestamp() })
-    .catch(err => { console.error(err); toast("😥", "기록하지 못했어요"); });
-  renderMoney();
-});
