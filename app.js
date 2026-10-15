@@ -29,6 +29,29 @@ const DEFAULT_TASKS = [
 
 let role = null, curDay = dkey(), unsubs = [];
 let tasks = [], recs = {}, doneAll = [], ledger = [];
+/* ---------- 시간 알림 (APK 안에서만 동작) ---------- */
+const LN = window.Capacitor?.isNativePlatform?.() ? window.Capacitor.Plugins?.LocalNotifications : null;
+let alarmSig = "";
+async function scheduleAlarms() {
+  if (!LN) return;
+  const items = [];
+  tasks.forEach((t, i) => {
+    if (!t.alarm) return;
+    const [h, m] = t.alarm.split(":").map(Number);
+    (t.days || ALL).forEach(d => items.push({
+      id: (i + 1) * 10 + d + 1, title: `${t.emoji} ${t.name}`, body: "사진 찍을 시간이에요!",
+      schedule: { on: { weekday: d + 1, hour: h, minute: m }, allowWhileIdle: true }
+    }));
+  });
+  const sig = JSON.stringify(items); if (sig === alarmSig) return; alarmSig = sig;
+  try {
+    const p = await LN.requestPermissions(); if (p.display !== "granted") return;
+    const pend = await LN.getPending();
+    if (pend.notifications.length) await LN.cancel({ notifications: pend.notifications });
+    if (items.length) await LN.schedule({ notifications: items });
+  } catch (e) { console.warn("알림 예약 실패", e); alarmSig = ""; }
+}
+
 let tab = "today", editing = null, payArm = false, camTask = null;
 
 /* ---------- 공통 ---------- */
@@ -128,6 +151,7 @@ function renderKid() {
     return `<button class="tile ${cls}" data-id="${esc(t.id)}">${th}<span class="emo">${esc(t.emoji)}</span><span class="nm">${esc(t.name)}</span><span class="st">${lab}</span></button>`;
   }).join("");
   $("#kClear").hidden = !(list.length && done.length === list.length);
+  scheduleAlarms();
 }
 $("#kGrid").addEventListener("click", e => {
   const b = e.target.closest(".tile"); if (!b) return;

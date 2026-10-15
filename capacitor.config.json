@@ -1,0 +1,9 @@
+{
+  "appId": "com.kfcccpro.missionclear",
+  "appName": "미션 클리어",
+  "webDir": "www",
+  "server": {
+    "url": "https://kfcccpro-ship-it.github.io/house_kdh/",
+    "cleartext": false
+  }
+}

@@ -1,0 +1,50 @@
+name: Build Android APK
+
+# 수동 실행: Actions 탭 → Build Android APK → Run workflow
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - run: npm install
+      - run: npx cap add android
+      - name: 권한 추가 및 버전 올리기
+        run: |
+          M=android/app/src/main/AndroidManifest.xml
+          sed -i 's#<application#<uses-permission android:name="android.permission.CAMERA" />\n    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />\n    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />\n    <uses-permission android:name="android.permission.USE_EXACT_ALARM" />\n    <uses-feature android:name="android.hardware.camera" android:required="false" />\n    <application#' "$M"
+          sed -i "s/versionCode 1/versionCode ${{ github.run_number }}/" android/app/build.gradle
+          grep -n "CAMERA\|versionCode" "$M" android/app/build.gradle
+      - run: npx cap sync android
+      - run: cd android && ./gradlew assembleRelease
+      - name: 서명 (고정 키)
+        env:
+          KS_B64: ${{ secrets.KEYSTORE_B64 }}
+        run: |
+          test -n "$KS_B64" || { echo "::error::KEYSTORE_B64 비밀값이 없습니다. Settings > Secrets and variables > Actions 에 추가하세요."; exit 1; }
+          echo "$KS_B64" | base64 -d > ks.jks
+          BT=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
+          UNS=$(ls android/app/build/outputs/apk/release/*.apk | head -1)
+          "$BT/zipalign" -f -p 4 "$UNS" aligned.apk
+          "$BT/apksigner" sign --ks ks.jks --ks-key-alias missionclear --ks-pass pass:missionclear2026 --key-pass pass:missionclear2026 --out mission-clear.apk aligned.apk
+          "$BT/apksigner" verify mission-clear.apk
+      - name: 다운로드 링크로 게시
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete apk-latest --yes --cleanup-tag --repo "${{ github.repository }}" || true
+          gh release create apk-latest mission-clear.apk --repo "${{ github.repository }}" \
+            --title "미션 클리어 APK (빌드 ${{ github.run_number }})" \
+            --notes "갤럭시에서 mission-clear.apk 를 받아 설치하세요." --latest=false
