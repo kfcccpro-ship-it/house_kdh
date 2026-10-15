@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#F2EEE5">
+<title>미션 클리어</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Black+Han+Sans&family=Gothic+A1:wght@400;500;700;800;900&display=swap">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="wrap">
+
+  <!-- 로그인 -->
+  <section id="login" class="sec" hidden>
+    <div class="brand">미션 클리어</div>
+    <h1 class="k-date">로그인</h1>
+    <form id="loginForm" class="ed" autocomplete="on">
+      <label for="lEmail">이메일<input id="lEmail" type="email" autocomplete="username" required></label>
+      <label for="lPw">비밀번호<input id="lPw" type="password" autocomplete="current-password" required></label>
+      <button class="pill solid" id="lBtn" type="submit">로그인</button>
+      <p class="note" id="lErr" role="alert"></p>
+    </form>
+  </section>
+
+  <!-- 아이 화면 -->
+  <section id="kid" class="sec" hidden style="gap:18px">
+    <div class="k-head">
+      <div class="brand">미션 클리어</div>
+      <h1 class="k-date" id="kDate"></h1>
+      <div class="k-stats"><span class="chip">⭐ <span id="kCnt"></span></span><span class="chip">💰 <span id="kWon"></span></span></div>
+      <div class="bar"><i id="kBar"></i></div>
+    </div>
+    <div class="grid" id="kGrid"></div>
+    <div class="clear" id="kClear" hidden>🎉 오늘 미션 클리어!</div>
+  </section>
+
+  <!-- 부모 화면 -->
+  <section id="par" class="sec" hidden>
+    <div class="p-head"><h1>부모 관리</h1><button class="pill sm" id="pOut">로그아웃</button></div>
+    <div class="tabs" role="tablist">
+      <button role="tab" data-t="today" aria-selected="true">오늘</button>
+      <button role="tab" data-t="tasks" aria-selected="false">할 일 관리</button>
+      <button role="tab" data-t="money" aria-selected="false">용돈</button>
+    </div>
+    <div id="tToday" class="sec"></div>
+    <div id="tTasks" class="sec" hidden></div>
+    <div id="tMoney" class="sec" hidden></div>
+  </section>
+
+</main>
+
+<input type="file" id="cam" accept="image/*" capture="environment" hidden>
+<div class="toast" id="toast" aria-live="polite"><b id="toastB"></b><span id="toastS"></span></div>
+
+<script type="module" src="app.js"></script>
+</body>
+</html>
