@@ -37,7 +37,15 @@ let tab = "review", editing = null, payArm = false, camTask = null, armed = null
 
 /* ---------- 시간 알림 (APK 안에서만 동작) ---------- */
 const LN = window.Capacitor?.isNativePlatform?.() ? window.Capacitor.Plugins?.LocalNotifications : null;
-let alarmSig = "";
+let alarmSig = "", chReady = false, exactAsked = false;
+const CH = "mc-alarm";
+async function prepAlarm() {                 // 권한 + 최고 중요도 채널(소리·진동·팝업·잠금화면) + 정확한 알람
+  const p = await LN.requestPermissions(); if (p.display !== "granted") return false;
+  if (!chReady) { await LN.createChannel({ id: CH, name: "미션 알람", description: "할 일 시간 알림", importance: 5, visibility: 1, vibration: true, lights: true }); chReady = true; }
+  if (!exactAsked) { exactAsked = true;
+    try { const x = await LN.checkExactNotificationSetting(); if (x.exact_alarm !== "granted") await LN.changeExactNotificationSetting(); } catch (e) {} }
+  return true;
+}
 async function scheduleAlarms() {            // 아이 폰: 할 일 시간 알림
   if (!LN) return;
   const items = [];
@@ -45,15 +53,16 @@ async function scheduleAlarms() {            // 아이 폰: 할 일 시간 알�
     if (!t.alarm || t.hidden) return;
     const [h, m] = t.alarm.split(":").map(Number);
     (t.days || ALL).forEach(d => items.push({
-      id: (i + 1) * 10 + d + 1, title: `${t.emoji} ${t.name}`, body: "사진 찍을 시간이에요!",
+      id: (i + 1) * 10 + d + 1, title: `${t.emoji} ${t.name}`, body: "사진 찍을 시간이에요!", channelId: CH,
       schedule: { on: { weekday: d + 1, hour: h, minute: m }, allowWhileIdle: true }
     }));
   });
   const sig = JSON.stringify(items); if (sig === alarmSig) return; alarmSig = sig;
   try {
-    const p = await LN.requestPermissions(); if (p.display !== "granted") return;
+    if (!await prepAlarm()) return;
     const pend = await LN.getPending();
-    if (pend.notifications.length) await LN.cancel({ notifications: pend.notifications });
+    const mine = pend.notifications.filter(n => n.id !== 9001);
+    if (mine.length) await LN.cancel({ notifications: mine });
     if (items.length) await LN.schedule({ notifications: items });
   } catch (e) { console.warn("알림 예약 실패", e); alarmSig = ""; }
 }
@@ -61,10 +70,10 @@ const getReviewAlarm = () => { try { return localStorage.getItem("mc-review-alar
 async function scheduleReviewAlarm() {       // 부모 폰: 매일 확인 알림
   if (!LN) return;
   try {
-    const p = await LN.requestPermissions(); if (p.display !== "granted") return;
+    if (!await prepAlarm()) return;
     await LN.cancel({ notifications: [{ id: 9001 }] });
     const [h, m] = getReviewAlarm().split(":").map(Number);
-    await LN.schedule({ notifications: [{ id: 9001, title: "📋 어제 미션 확인", body: "확인하고 용돈을 이체해 주세요.",
+    await LN.schedule({ notifications: [{ id: 9001, title: "📋 어제 미션 확인", body: "확인하고 용돈을 이체해 주세요.", channelId: CH,
       schedule: { on: { hour: h, minute: m }, allowWhileIdle: true } }] });
   } catch (e) { console.warn("확인 알림 예약 실패", e); }
 }
@@ -201,6 +210,16 @@ function renderKid() {
     || '<div class="row"><div class="tx"><span>아직 기록이 없어요.</span></div></div>';
   scheduleAlarms();
 }
+
+$("#kTest").addEventListener("click", async () => {   // 알림 시험: 10초 뒤 울림
+  if (!LN) { toast("ℹ️", "앱(APK)에서만 알림이 와요"); return; }
+  try {
+    if (!await prepAlarm()) { toast("⚠️", "알림 권한을 허용해 주세요"); return; }
+    await LN.schedule({ notifications: [{ id: 9999, title: "🔔 알림 시험", body: "이렇게 알림이 와요!", channelId: CH,
+      schedule: { at: new Date(Date.now() + 10000), allowWhileIdle: true } }] });
+    toast("🔔", "10초 뒤 알림이 와요. 화면을 꺼 보세요");
+  } catch (e) { toast("⚠️", "알림 예약 실패"); }
+});
 
 $("#kGrid").addEventListener("click", e => {
   const b = e.target.closest(".tile"); if (!b) return;
