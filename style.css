@@ -149,3 +149,5 @@ button:focus-visible,input:focus-visible{outline:3px solid var(--gold);outline-o
 .sw[aria-pressed="true"]{background:var(--ink);color:var(--bg)}
 .duo label{display:flex;flex-direction:column;gap:6px;font-size:13px;font-weight:800;color:var(--muted)}
 .row .ph{font-size:20px;white-space:nowrap;letter-spacing:-2px}
+.row.on{background:var(--bg)}
+.list > .ed{margin:0 10px 12px;border-radius:16px}

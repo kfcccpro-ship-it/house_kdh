@@ -211,7 +211,7 @@ function renderKid() {
   scheduleAlarms();
 }
 
-$("#kTest").addEventListener("click", async () => {   // 알림 시험: 10초 뒤 울림
+$("#kTest")?.addEventListener("click", async () => {   // 알림 시험: 10초 뒤 울림
   if (!LN) { toast("ℹ️", "앱(APK)에서만 알림이 와요"); return; }
   try {
     if (!await prepAlarm()) { toast("⚠️", "알림 권한을 허용해 주세요"); return; }
@@ -337,9 +337,7 @@ $("#tReview").addEventListener("click", async e => {
 
 function renderTasks() {
   const t = editing;
-  $("#tTasks").innerHTML = `
-    <div class="list">${tasks.map(x => `<div class="row${x.hidden ? " dim" : ""}"><span class="ph">${esc(x.emoji)}</span><div class="tx"><b>${esc(x.name)}${x.hidden ? ' <span class="tag wait">숨김</span>' : ""}</b><span>${won(x.amount)} · ${x.alarm ? "알림 " + esc(x.alarm) : "알림 없음"} · ${(x.days || ALL).length === 7 ? "매일" : (x.days || []).map(d => DAYS[d]).join("")}${x.needPhoto === false ? " · 사진 없이" : ""}</span></div><button class="pill sm" data-ed="${esc(x.id)}">수정</button></div>`).join("")}</div>
-    ${t ? `<div class="ed" id="ed">
+  const edHTML = !t ? "" : `<div class="ed" id="ed">
       <label>아이콘<div class="emos">${EMOS.map(m => `<button type="button" data-emo="${esc(m)}" aria-pressed="${m === t.emoji}">${m}</button>`).join("")}</div></label>
       <label for="fName">할 일 이름<input id="fName" value="${esc(t.name)}" placeholder="예: 영어 단어 20개"></label>
       <label for="fMemo">아이에게 보이는 메모 (선택)<input id="fMemo" value="${esc(t.memo || "")}" placeholder="예: 밥 먹고 바로!"></label>
@@ -351,7 +349,10 @@ function renderTasks() {
         <button type="button" class="sw" data-sw="hidden" aria-pressed="${!!t.hidden}">🙈 임시 숨김</button>
       </div>
       <div class="acts">${t.id ? `<button class="pill sm warn" id="fDel">${t.delArm ? "정말 삭제" : "삭제"}</button>` : ""}<button class="pill sm" id="fCancel">취소</button><button class="pill sm solid" id="fSave">저장</button></div>
-    </div>` : `<button class="add" id="addT">+ 할 일 추가</button>`}
+    </div>`;
+  $("#tTasks").innerHTML = `
+    <div class="list">${tasks.map(x => `<div class="row${x.hidden ? " dim" : ""}${t && t.id === x.id ? " on" : ""}"><span class="ph">${esc(x.emoji)}</span><div class="tx"><b>${esc(x.name)}${x.hidden ? ' <span class="tag wait">숨김</span>' : ""}</b><span>${won(x.amount)} · ${x.alarm ? "알림 " + esc(x.alarm) : "알림 없음"} · ${(x.days || ALL).length === 7 ? "매일" : (x.days || []).map(d => DAYS[d]).join("")}${x.needPhoto === false ? " · 사진 없이" : ""}</span></div><button class="pill sm" data-ed="${esc(x.id)}">${t && t.id === x.id ? "편집 중" : "수정"}</button></div>${t && t.id === x.id ? edHTML : ""}`).join("")}</div>
+    ${t && !t.id ? edHTML : t ? "" : `<button class="add" id="addT">+ 할 일 추가</button>`}
     <div class="ed"><label for="fReview">부모 확인 알림 시간 (이 폰, 앱에서만 울림)<input id="fReview" type="time" value="${esc(getReviewAlarm())}"></label></div>`;
 }
 $("#tTasks").addEventListener("change", e => {
@@ -362,8 +363,9 @@ $("#tTasks").addEventListener("change", e => {
 $("#tTasks").addEventListener("click", async e => {
   const b = e.target.closest("button"); if (!b) return;
   const sync = () => { if (!editing) return; editing.name = $("#fName").value; editing.memo = $("#fMemo").value; editing.amount = +$("#fAmt").value || 0; editing.alarm = $("#fAlarm").value; };
-  if (b.id === "addT") { editing = { id: null, emoji: "📖", name: "", memo: "", amount: 2000, alarm: "", days: [...ALL], needPhoto: true, hidden: false }; renderTasks(); $("#fName").focus(); return; }
-  if (b.dataset.ed) { const x = tasks.find(y => y.id === b.dataset.ed); editing = { ...x, days: [...(x.days || ALL)] }; renderTasks(); return; }
+  if (b.id === "addT") { editing = { id: null, emoji: "📖", name: "", memo: "", amount: 2000, alarm: "", days: [...ALL], needPhoto: true, hidden: false }; renderTasks(); $("#ed")?.scrollIntoView({ behavior: "smooth", block: "center" }); $("#fName").focus(); return; }
+  if (b.dataset.ed) { const x = tasks.find(y => y.id === b.dataset.ed); if (editing && editing.id === x.id) { editing = null; renderTasks(); return; }
+    editing = { ...x, days: [...(x.days || ALL)] }; renderTasks(); $("#ed")?.scrollIntoView({ behavior: "smooth", block: "center" }); return; }
   if (b.dataset.emo) { sync(); editing.emoji = b.dataset.emo; renderTasks(); return; }
   if (b.dataset.sw) { sync(); const k = b.dataset.sw; editing[k] = k === "needPhoto" ? editing.needPhoto === false : !editing.hidden; renderTasks(); return; }
   if (b.dataset.day) { sync(); const d = +b.dataset.day; editing.days = editing.days.includes(d) ? editing.days.filter(x => x !== d) : [...editing.days, d].sort(); renderTasks(); return; }
