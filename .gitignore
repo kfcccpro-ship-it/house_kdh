@@ -2,3 +2,4 @@ node_modules/
 android/
 *.jks
 *.keystore
+push/node_modules/

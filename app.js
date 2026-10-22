@@ -37,7 +37,7 @@ let tab = "review", editing = null, payArm = false, camTask = null, armed = null
 
 /* ---------- 시간 알림 (APK 안에서만 동작) ---------- */
 const LN = window.Capacitor?.isNativePlatform?.() ? window.Capacitor.Plugins?.LocalNotifications : null;
-let alarmSig = "", chReady = false, exactAsked = false;
+let pushTried = false, alarmSig = "", chReady = false, exactAsked = false;
 const CH = "mc-alarm";
 async function prepAlarm() {                 // 권한 + 최고 중요도 채널(소리·진동·팝업·잠금화면) + 정확한 알람
   const p = await LN.requestPermissions(); if (p.display !== "granted") return false;
@@ -209,10 +209,33 @@ function renderKid() {
     ${by[k].paid ? `<span class="tag paid">💸 ${won(by[k].paid)}</span>` : ""}</div></div>`).join("")
     || '<div class="row"><div class="tx"><span>아직 기록이 없어요.</span></div></div>';
   scheduleAlarms();
+  if (!LN) { $("#kTest").textContent = "🔔 알림 켜기"; if (!pushTried) { pushTried = true; enablePush(true); } }
+}
+
+/* ---------- 웹 푸시 (아이폰 홈 화면 앱 등, APK가 아닐 때) ---------- */
+const standalone = () => matchMedia("(display-mode: standalone)").matches || navigator.standalone === true;
+async function enablePush(silent) {
+  try {
+    if (!("serviceWorker" in navigator) || !("Notification" in window) || !("PushManager" in window)) {
+      if (!silent) toast("ℹ️", /iPhone|iPad/.test(navigator.userAgent) && !standalone()
+        ? "Safari 공유 → '홈 화면에 추가' 후 그 앱에서 눌러 주세요" : "이 브라우저는 알림을 지원하지 않아요");
+      return;
+    }
+    const perm = silent ? Notification.permission : await Notification.requestPermission();
+    if (perm !== "granted") { if (!silent) toast("⚠️", "알림을 '허용'해 주세요 (설정 → 알림)"); return; }
+    const reg = await navigator.serviceWorker.register("sw.js");
+    await navigator.serviceWorker.ready;
+    const m = await import("https://www.gstatic.com/firebasejs/10.14.1/firebase-messaging.js");
+    if (!await m.isSupported()) { if (!silent) toast("ℹ️", "이 기기는 웹 알림을 지원하지 않아요"); return; }
+    const token = await m.getToken(m.getMessaging(app), { serviceWorkerRegistration: reg });
+    if (!token) return;
+    await setDoc(doc(db, "push", token), { token, role, uid: auth.currentUser.uid, ua: navigator.userAgent.slice(0, 120), at: serverTimestamp() });
+    if (!silent) { reg.showNotification("🔔 알림이 켜졌어요", { body: "할 일 시간에 알려 드릴게요", icon: "icon-192.png" }); toast("🔔", "알림이 켜졌어요"); }
+  } catch (e) { console.warn("웹 푸시 등록 실패", e); if (!silent) toast("😥", "알림을 켜지 못했어요"); }
 }
 
 $("#kTest")?.addEventListener("click", async () => {   // 알림 시험: 10초 뒤 울림
-  if (!LN) { toast("ℹ️", "앱(APK)에서만 알림이 와요"); return; }
+  if (!LN) { enablePush(false); return; }
   try {
     if (!await prepAlarm()) { toast("⚠️", "알림 권한을 허용해 주세요"); return; }
     await LN.schedule({ notifications: [{ id: 9999, title: "🔔 알림 시험", body: "이렇게 알림이 와요!", channelId: CH,
